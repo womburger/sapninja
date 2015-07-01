@@ -1,6 +1,8 @@
 # sapninja
 Automatically exported from code.google.com/p/sapninja
 
+https://www.linkedin.com/pub/jim-cooke/4/97/908
+
 Latest News
 January 16, 2015. By way of a final update, the code will remain here indefinitely but I have recently been approached by several people, quite independently of one another, for assistance in standing up a collector for SM19/SM20 logs only. To this end, I have written a very robust standalone application in the Z namespace, which extracts SM20 logs into CSV or Keypair format centrally from all application servers and never duplicates data. I charge 2 days consulting fees ($A2000 excl GST) to provide the code, operational documentation and assistance for the initial deployment. Please contact me directly if this is an option is of interest. No developers are required, the code is supplied as a transport, needing only BASIS to import it and schedule the collection jobs.
 
