@@ -1,0 +1,959 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FUGR AREA="ZNINJA_MONITOR" SPRAS="E" AREAT="Extended Table Maintenance (Generated)">
+ <functionGroupDocumentation/>
+ <mainprogram NAME="SAPLZNINJA_MONITOR" SQLX="X" VARCL="X" DBAPL="S" DBNA="D$" SUBC="F" APPL="S" RMAND="001" RLOAD="E" FIXPT="X" LDBNAME="D$S" UCCHECK="X">
+  <textPool/>
+  <source>*******************************************************************
+*   System-defined Include-files.                                 *
+*******************************************************************
+  INCLUDE LZNINJA_MONITORTOP.                &quot; Global Data
+  INCLUDE LZNINJA_MONITORUXX.                &quot; Function Modules
+
+*******************************************************************
+*   User-defined Include-files (if necessary).                    *
+*******************************************************************
+* INCLUDE LZNINJA_MONITORF...                &quot; Subroutines
+* INCLUDE LZNINJA_MONITORO...                &quot; PBO-Modules
+* INCLUDE LZNINJA_MONITORI...                &quot; PAI-Modules
+* INCLUDE LZNINJA_MONITORE...                &quot; Events
+* INCLUDE LZNINJA_MONITORP...                &quot; Local class implement.</source>
+ </mainprogram>
+ <includeprograms>
+  <include NAME="LZNINJA_MONITORTOP" VARCL="X" DBAPL="S" DBNA="D$" SUBC="I" APPL="S" RMAND="001" FIXPT="X" LDBNAME="D$S" UCCHECK="X">
+   <include_source>FUNCTION-POOL ZNINJA_MONITOR            . &quot;MESSAGE-ID ...
+
+* INCLUDE LZNINJA_MONITORD...                &quot; Local class definition</include_source>
+  </include>
+ </includeprograms>
+ <functionmodules>
+  <functionmodule NAME="ZNINJA_DAEMON" REMOTE="R" STEXT="SAP Ninja Monitor Daemon">
+   <importing PARAMETER="INSTANCE" TYP="ZNINJA_INSTANCE"/>
+   <documentation PARAMETER="INSTANCE" KIND="P" STEXT="Instance" INDEX=" 001"/>
+   <fm_source_new>* ----------------------------------------------------------------------
+* Copyright (C) 2012
+* Author: Jim Cooke (Australia)
+* Version 3.00
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+* You should have received a copy of the GNU General Public License
+* along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+* ----------------------------------------------------------------------
+*--------------------------------------------------------------------------------
+* Change Log:
+* ----------
+*   Date       Issue #  Issue Link
+* -----------  -------  ------------------------
+*--------------------------------------------------------------------------------
+  DATA: BACKGROUND_SLOTS_AVAILABLE TYPE ZNINJA_INT_VAL,
+        BACKGROUND_SLOTS_IN_USE TYPE ZNINJA_INT_VAL,
+        BACKGROUND_SLOTS_TOTAL TYPE ZNINJA_INT_VAL,
+        COLLECTION_TYPE TYPE ZNINJA_INT_VAL,
+        COMPLETELY_READ TYPE ZNINJA_FLAG,
+        CRONTAB TYPE STANDARD TABLE OF ZNINJA_CRONTAB,
+        COLLECTION_SOURCE TYPE ZNINJA_INT_VAL,
+        CRONTABX TYPE STANDARD TABLE OF ZNINJA_CRONTABX,
+        DAEMON_ALLOWED_HERE TYPE ZNINJA_FLAG,
+        DAEMON_GUID TYPE SYSUUID_X,
+        DAT TYPE ZNINJA_DATE,
+        DBCHECK_INTERVAL_SECS TYPE ZNINJA_INT_VAL,
+        HEARTBEAT_SECS TYPE ZNINJA_INT_VAL,
+        IDX TYPE INT4,
+        INTVALUES  TYPE ZNINJA_TT_INTEGERS,
+        JOBHEAD LIKE TBTCJOB,
+        JOBNUMBER TYPE TBTCJOB-JOBCOUNT,
+        KEYTAB_KEY TYPE ZNINJA_ATTRIBUTE,
+        KEYTAB_REC TYPE ZNINJA_KEYTAB_FIELDS,
+        LAST_DB_WORK_TS TYPE TIMESTAMP,
+        LOGMSG TYPE ZNINJA_LONGSTRING,
+        MODULUS TYPE INT1,
+        NOW_TS TYPE TIMESTAMP,
+        NUMERATOR TYPE INT1,
+        CRON_OK TYPE ZNINJA_FLAG,
+        CRONX_BLOCK TYPE ZNINJA_FLAG,
+        OKCODE TYPE ZNINJA_FLAG,
+        PENDING TYPE ZNINJA_INT_VAL,
+        PLAYED_FORWARD_YET TYPE ZNINJA_FLAG,
+        PRINT_PARAMETERS TYPE PRI_PARAMS,
+        QUEUE_BGD TYPE STANDARD TABLE OF ZNINJA_BGD_QUEUE,
+        QUEUE_BGD_ENTRY TYPE ZNINJA_BGD_QUEUE,
+        QUEUE_DIA_ENTRY TYPE ZNINJA_EXEC_QUEUE_ENTRY,
+        QUEUE_DIA TYPE ZNINJA_TT_EXEC_QUEUE,
+        RTNVAL TYPE ZNINJA_INT_VAL,
+        SOMETHING_SCHEDULED TYPE ZNINJA_FLAG,
+        SECS_DIFF TYPE TZNTSTMPL,
+        SLEEP_TIME TYPE INT4,
+        SLEEP_TIME_TO_FIRST_SCHEDULE TYPE INT4,
+        STEPLIST TYPE STANDARD TABLE OF TBTCSTEP,
+        TARGETSERVER TYPE BTCTGTSRVR-SRVNAME,
+        TID TYPE ARFCTID,
+        TIM TYPE ZNINJA_TIME,
+        TIMESTAMP1 TYPE TIMESTAMP,
+        TIMESTAMP2 TYPE TIMESTAMP,
+        TMPSTR1 TYPE STRING,
+        TMPSTR2 TYPE STRING,
+        TMPSTR3 TYPE STRING.
+
+  CONSTANTS: GRANULARITY_SECS TYPE INT1 VALUE 5,
+             JOBNAME TYPE BTCJOB VALUE &apos;ZNINJA_BGD_TASK&apos;.
+
+  FIELD-SYMBOLS: &lt;CRON&gt; TYPE ZNINJA_CRONTAB,
+                 &lt;CRONREC&gt; TYPE ZNINJA_CRONTAB,
+                 &lt;CRONX&gt; TYPE ZNINJA_CRONTABX,
+                 &lt;Q&gt; TYPE ZNINJA_EXEC_QUEUE_ENTRY,
+                 &lt;RVAL&gt; TYPE ZNINJA_INT_VAL.
+
+  MOVE &apos;19000101000000&apos; TO LAST_DB_WORK_TS.
+  TARGETSERVER = SY-HOST.
+
+  &quot; Check if we allow a scheduler daemon to run on this instance
+  CONCATENATE &apos;DAEMON_ALLOWED_ON_&apos; INSTANCE INTO KEYTAB_KEY SEPARATED BY SPACE.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+    EXPORTING
+      TABLE  = &apos;ZNINJA_CONFIG&apos;
+      ID     = KEYTAB_KEY
+    IMPORTING
+      RECORD = KEYTAB_REC
+      RESULT = RTNVAL.
+  IF RTNVAL NE 0.
+    KEYTAB_REC-DESCRIPTION = &apos;Execute scheduler daemon on this instance?&apos;.
+    KEYTAB_REC-STATUS = &apos;Y&apos;.
+    KEYTAB_REC-DAT = SY-DATUM.
+    KEYTAB_REC-TIM = SY-UZEIT.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+      EXPORTING
+        TABLE  = &apos;ZNINJA_CONFIG&apos;
+        ID     = KEYTAB_KEY
+        RECORD = KEYTAB_REC
+      IMPORTING
+        RESULT = RTNVAL.
+  ENDIF.
+  DAEMON_ALLOWED_HERE = KEYTAB_REC-STATUS.
+  IF DAEMON_ALLOWED_HERE = &apos;N&apos;.
+    CONCATENATE &apos;Scheduler daemon not allowed on instance&apos; INSTANCE &apos;(check ZNINJA_CONFIG table).  Stopping&apos; INTO LOGMSG SEPARATED BY SPACE.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+      EXPORTING
+        LEVEL  = 2
+        LOGMSG = LOGMSG.
+    CONCATENATE &apos;DAEMON_&apos; INSTANCE INTO KEYTAB_KEY.
+    DELETE FROM ZNINJA_REGISTRY WHERE ID = KEYTAB_KEY.
+    CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+    KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+    KEYTAB_REC-STATUS = &apos;N&apos;.
+    KEYTAB_REC-DAT = SY-DATUM.
+    KEYTAB_REC-TIM = SY-UZEIT.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+      EXPORTING
+        TABLE  = &apos;ZNINJA_REGISTRY&apos;
+        ID     = KEYTAB_KEY
+        RECORD = KEYTAB_REC
+      IMPORTING
+        RESULT = RTNVAL.
+    EXIT.
+  ENDIF.
+
+  &quot; Find out what the heartbeat time is for the scheduler daemon
+  MOVE &apos;DAEMON_HEARTBEAT&apos; TO KEYTAB_KEY.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+    EXPORTING
+      TABLE  = &apos;ZNINJA_CONFIG&apos;
+      ID     = KEYTAB_KEY
+    IMPORTING
+      RECORD = KEYTAB_REC
+      RESULT = RTNVAL.
+  IF RTNVAL NE 0.
+    KEYTAB_REC-DESCRIPTION = &apos;Maximum sleep time between iterations for scheduler daemon&apos;.
+    KEYTAB_REC-INT_VAL = 600.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+      EXPORTING
+        TABLE  = &apos;ZNINJA_CONFIG&apos;
+        ID     = KEYTAB_KEY
+        RECORD = KEYTAB_REC
+      IMPORTING
+        RESULT = RTNVAL.
+  ENDIF.
+  HEARTBEAT_SECS = KEYTAB_REC-INT_VAL.
+
+  &quot; Get the number of exeuction slots
+  CONCATENATE &apos;EXECUTION_SLOTS_&apos; INSTANCE INTO KEYTAB_KEY.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+    EXPORTING
+      TABLE  = &apos;ZNINJA_CONFIG&apos;
+      ID     = KEYTAB_KEY
+    IMPORTING
+      RECORD = KEYTAB_REC
+      RESULT = RTNVAL.
+  IF RTNVAL NE 0.
+    KEYTAB_REC-DESCRIPTION = &apos;Maximum number of SAP Ninja parallel jobs on this instance&apos;.
+    KEYTAB_REC-INT_VAL = 1.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+      EXPORTING
+        TABLE  = &apos;ZNINJA_CONFIG&apos;
+        ID     = KEYTAB_KEY
+        RECORD = KEYTAB_REC
+      IMPORTING
+        RESULT = RTNVAL.
+  ENDIF.
+  BACKGROUND_SLOTS_TOTAL = KEYTAB_REC-INT_VAL.
+
+  &quot; Find out what the DB sync/refresh time is for the scheduler daemon
+  MOVE &apos;DAEMON_DBCHECK&apos; TO KEYTAB_KEY.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+    EXPORTING
+      TABLE  = &apos;ZNINJA_CONFIG&apos;
+      ID     = KEYTAB_KEY
+    IMPORTING
+      RECORD = KEYTAB_REC
+      RESULT = RTNVAL.
+  IF RTNVAL NE 0.
+    KEYTAB_REC-DESCRIPTION = &apos;Interval at which daemon re-checks the ZNINJA_CRONTAB and ZNINJA_CRONTABX tables&apos;.
+    KEYTAB_REC-INT_VAL = 600.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+      EXPORTING
+        TABLE  = &apos;ZNINJA_CONFIG&apos;
+        ID     = KEYTAB_KEY
+        RECORD = KEYTAB_REC
+      IMPORTING
+        RESULT = RTNVAL.
+  ENDIF.
+  DBCHECK_INTERVAL_SECS = KEYTAB_REC-INT_VAL.
+
+* Set an execution token for this process.  If one exists already, make sure it is older than SLEEP_TIME seconds
+  CONCATENATE &apos;DAEMON_&apos; INSTANCE INTO KEYTAB_KEY.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+    EXPORTING
+      TABLE  = &apos;ZNINJA_REGISTRY&apos;
+      ID     = KEYTAB_KEY
+    IMPORTING
+      RECORD = KEYTAB_REC
+      RESULT = RTNVAL.
+  IF RTNVAL = 0.
+    CONVERT DATE SY-DATUM TIME SY-UZEIT INTO TIME STAMP TIMESTAMP1 TIME ZONE SY-ZONLO.
+    CONVERT DATE KEYTAB_REC-DAT TIME KEYTAB_REC-TIM INTO TIME STAMP TIMESTAMP2 TIME ZONE SY-ZONLO.
+    CALL METHOD CL_ABAP_TSTMP=&gt;SUBTRACT
+      EXPORTING
+        TSTMP1 = TIMESTAMP1
+        TSTMP2 = TIMESTAMP2
+      RECEIVING
+        R_SECS = SECS_DIFF.
+    IF SECS_DIFF &lt;= HEARTBEAT_SECS.
+      &quot; If date difference is &lt;= HEARTBEAT-INT_VAL then exit (this means a different daemon is already running)
+      CONCATENATE &apos;Scheduler daemon failed to start on &apos; INSTANCE &apos; because it is already active&apos; INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 2
+          LOGMSG = LOGMSG.
+      CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+      KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+      KEYTAB_REC-STATUS = &apos;N&apos;.
+      KEYTAB_REC-DAT = SY-DATUM.
+      KEYTAB_REC-TIM = SY-UZEIT.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_REGISTRY&apos;
+          ID     = KEYTAB_KEY
+          RECORD = KEYTAB_REC
+        IMPORTING
+          RESULT = RTNVAL.
+      EXIT.
+    ENDIF.
+  ENDIF.
+
+  &quot; Create the execution token for this daemon
+    IMPORTING
+      UUID = DAEMON_GUID.
+  CONCATENATE &apos;Scheduler Daemon&apos; INSTANCE INTO KEYTAB_REC-DESCRIPTION SEPARATED BY SPACE.
+  KEYTAB_REC-GUID = DAEMON_GUID.
+  KEYTAB_REC-DAT = SY-DATUM.
+  KEYTAB_REC-TIM = SY-UZEIT.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+    EXPORTING
+      TABLE  = &apos;ZNINJA_REGISTRY&apos;
+      ID     = KEYTAB_KEY
+      RECORD = KEYTAB_REC
+    IMPORTING
+      RESULT = RTNVAL.
+  MOVE DAEMON_GUID TO TMPSTR1.
+  CONCATENATE &apos;Scheduler Daemon started successfully with execution token&apos; TMPSTR1 &apos;on&apos; INSTANCE INTO LOGMSG SEPARATED BY SPACE.
+  CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+    EXPORTING
+      LEVEL  = 3
+      LOGMSG = LOGMSG.
+
+* ---------------------------------------------------------------------------------------------------------------------------------------
+* DAEMON Iterations (The actual scheduler loops here)
+* ---------------------------------------------------------------------------------------------------------------------------------------
+  DO.
+    CONCATENATE &apos;Scheduler daemon wakes up on&apos; INSTANCE INTO LOGMSG SEPARATED BY SPACE.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+      EXPORTING
+        LEVEL  = 3
+        LOGMSG = LOGMSG.
+
+    CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+    KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+    KEYTAB_REC-STATUS = &apos;Y&apos;.
+    KEYTAB_REC-DAT = SY-DATUM.
+    KEYTAB_REC-TIM = SY-UZEIT.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+      EXPORTING
+        TABLE  = &apos;ZNINJA_REGISTRY&apos;
+        ID     = KEYTAB_KEY
+        RECORD = KEYTAB_REC
+      IMPORTING
+        RESULT = RTNVAL.
+
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Check daemon guid execution token
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    CONCATENATE &apos;DAEMON_&apos; INSTANCE INTO KEYTAB_KEY.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;CHECK_EXECUTION_GUID
+      EXPORTING
+        KEY   = KEYTAB_KEY
+        GUID  = DAEMON_GUID
+      RECEIVING
+        VALID = OKCODE.
+    IF OKCODE = &apos;N&apos;.
+      CONCATENATE &apos;Scheduler daemon execution token&apos; TMPSTR1 &apos;no longer valid&apos; INSTANCE &apos;, terminating process&apos; INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 3
+          LOGMSG = LOGMSG.
+      CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+      KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+      KEYTAB_REC-STATUS = &apos;N&apos;.
+      KEYTAB_REC-DAT = SY-DATUM.
+      KEYTAB_REC-TIM = SY-UZEIT.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_REGISTRY&apos;
+          ID     = KEYTAB_KEY
+          RECORD = KEYTAB_REC
+        IMPORTING
+          RESULT = RTNVAL.
+      EXIT.
+    ENDIF.
+
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Execute pending tasks section
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Now check if this is a local or central collection.  If it is central, check none of the other shcedulers have already grabbed it.
+
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Execute: Point-in-time snapshot data (type 1) MEMORY-RESIDENT WORKLIST, LOCAL EXECUTION, SYNCHRONOUS
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    PENDING = LINES( QUEUE_DIA ).
+    IF PENDING = 0.
+      CONCATENATE &apos;Scheduler daemon on&apos; INSTANCE &apos;has no pending DIALOG tasks&apos; INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 4
+          LOGMSG = LOGMSG.
+    ENDIF.
+    WHILE PENDING &gt; 0.
+      READ TABLE QUEUE_DIA ASSIGNING &lt;Q&gt; INDEX 1.
+      IF SY-SUBRC = 0.
+        &quot; Execute task
+        MOVE &lt;Q&gt;-CRON_GUID TO TMPSTR1.
+
+        READ TABLE CRONTAB WITH KEY GUID = &lt;Q&gt;-CRON_GUID ASSIGNING &lt;CRONREC&gt;.
+        IF SY-SUBRC = 0.
+          CONCATENATE &apos;Scheduler daemon on&apos; INSTANCE &apos;executing &apos; &lt;CRONREC&gt;-METRIC_ID &apos;in DIALOG&apos; INTO LOGMSG SEPARATED BY SPACE.
+          CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+            EXPORTING
+              LEVEL  = 3
+              LOGMSG = LOGMSG.
+
+          CONCATENATE &apos;Task execution token for metric&apos; &lt;CRONREC&gt;-METRIC_ID &apos;on instance&apos; INTO KEYTAB_REC-DESCRIPTION SEPARATED BY SPACE.
+          &quot; Execute task directly, passing CRON GUID, EXECUTION GUID, schedule DATE and schedule TIME as parameters
+          SUBMIT ZNINJA_CRON_DIA_TASK
+            WITH CRON_ID = &lt;CRONREC&gt;-GUID
+            WITH LOGDATE = &lt;Q&gt;-RUN_DATE
+            WITH LOGTIME = &lt;Q&gt;-RUN_TIME
+          AND RETURN.
+
+          &quot; See if all outstanding records were read
+          CLEAR KEYTAB_REC.
+          CONCATENATE &apos;COMPLETE_READ_&apos; &lt;CRONREC&gt;-METRIC_ID &apos;_&apos; INSTANCE INTO KEYTAB_KEY.
+          CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+            EXPORTING
+              TABLE  = &apos;ZNINJA_REGISTRY&apos;
+              ID     = KEYTAB_KEY
+            IMPORTING
+              RECORD = KEYTAB_REC
+              RESULT = RTNVAL.
+          IF RTNVAL = 0.
+            COMPLETELY_READ = KEYTAB_REC-STATUS.
+          ENDIF.
+          IF COMPLETELY_READ = &apos;Y&apos;.
+            DELETE QUEUE_DIA INDEX 1.
+          ENDIF.
+        ELSE.
+          CONCATENATE &apos;Unable to schedule job on instance&apos; INSTANCE &apos;because cron GUID no longer in ZNINJA_CRONTAB&apos; INTO LOGMSG SEPARATED BY SPACE.
+          CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+            EXPORTING
+              LEVEL  = 1
+              LOGMSG = LOGMSG.
+          DELETE QUEUE_DIA INDEX 1.
+        ENDIF.
+        &quot; Dequeue task
+      ENDIF.
+      PENDING = LINES( QUEUE_DIA ).
+    ENDWHILE.
+
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Execute: New data not already collected (type 2)               - DATABASE QUEUE    BACKGROUND
+    &quot;          Metrics with precise collection time range (type 3)   - DATABASE QUEUE    BACKGROUND
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    SELECT COUNT( * ) INTO PENDING
+    FROM ZNINJA_BGD_QUEUE
+    WHERE ( INSTANCE = INSTANCE OR INSTANCE = &apos;ANY&apos; ) AND
+            COMPLETED = &apos;N&apos;.
+
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;COUNT_EXECUTING_JOBS
+      EXPORTING
+        JOBNAME  = JOBNAME
+        INSTANCE = INSTANCE
+      RECEIVING
+        RTNVAL   = BACKGROUND_SLOTS_IN_USE.
+    BACKGROUND_SLOTS_AVAILABLE = BACKGROUND_SLOTS_TOTAL - RTNVAL.
+
+    MOVE PENDING TO TMPSTR1.
+    MOVE BACKGROUND_SLOTS_AVAILABLE TO TMPSTR2.
+    MOVE BACKGROUND_SLOTS_IN_USE TO TMPSTR3.
+    CONCATENATE &apos;ZNINJA_DAEMON thinks there are&apos; TMPSTR1 &apos;jobs pending on instance&apos; INSTANCE &apos;,&apos;
+                TMPSTR2 &apos;free slots.&apos; &apos;,&apos; TMPSTR3 &apos;executing.&apos; INTO LOGMSG SEPARATED BY SPACE.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+      EXPORTING
+        LEVEL  = 4
+        LOGMSG = LOGMSG.
+
+    IF PENDING &gt; BACKGROUND_SLOTS_AVAILABLE.
+      PENDING = BACKGROUND_SLOTS_AVAILABLE.
+    ENDIF.
+    DO PENDING TIMES.
+        EXPORTING
+          JOBNAME          = JOBNAME
+        IMPORTING
+          JOBCOUNT         = JOBNUMBER
+        EXCEPTIONS
+          CANT_CREATE_JOB  = 1
+          INVALID_JOB_DATA = 2
+          JOBNAME_MISSING  = 3
+          OTHERS           = 4.
+      IF SY-SUBRC = 0.
+          EXPORTING
+            AUTHCKNAM               = SY-UNAME
+            JOBCOUNT                = JOBNUMBER
+            JOBNAME                 = JOBNAME
+            LANGUAGE                = SY-LANGU
+            REPORT                  = &apos;ZNINJA_CRON_BGD_TASK&apos;
+          EXCEPTIONS
+            BAD_PRIPARAMS           = 1
+            BAD_XPGFLAGS            = 2
+            INVALID_JOBDATA         = 3
+            JOBNAME_MISSING         = 4
+            JOB_NOTEX               = 5
+            JOB_SUBMIT_FAILED       = 6
+            LOCK_FAILED             = 7
+            PROGRAM_MISSING         = 8
+            PROG_ABAP_AND_EXTPG_SET = 9
+            OTHERS                  = 10.
+        IF SY-SUBRC = 0.
+          &quot; Make sure the job executes on the right application server
+            EXPORTING
+              JOB_READ_JOBCOUNT     = JOBNUMBER
+              JOB_READ_JOBNAME      = JOBNAME
+              JOB_READ_OPCODE       = &apos;20&apos;
+            IMPORTING
+              JOB_READ_JOBHEAD      = JOBHEAD
+            TABLES
+              JOB_READ_STEPLIST     = STEPLIST
+            EXCEPTIONS
+              INVALID_OPCODE        = 1
+              JOB_DOESNT_EXIST      = 2
+              JOB_DOESNT_HAVE_STEPS = 3
+              OTHERS                = 4.
+          JOBHEAD-EXECSERVER = INSTANCE.
+            EXPORTING
+              DIALOG           = &apos;N&apos;
+              JOBCOUNT         = JOBHEAD-JOBCOUNT
+              JOBNAME          = JOBHEAD-JOBNAME
+              NEW_JOBHEAD      = JOBHEAD
+              OPCODE           = &apos;16&apos;
+            IMPORTING
+              MODIFIED_JOBHEAD = JOBHEAD
+            TABLES
+              NEW_STEPLIST     = STEPLIST.
+
+            EXPORTING
+              JOBCOUNT             = JOBNUMBER
+              JOBNAME              = JOBNAME
+              STRTIMMED            = &apos;X&apos;
+            EXCEPTIONS
+              CANT_START_IMMEDIATE = 1
+              INVALID_STARTDATE    = 2
+              JOBNAME_MISSING      = 3
+              JOB_CLOSE_FAILED     = 4
+              JOB_NOSTEPS          = 5
+              JOB_NOTEX            = 6
+              LOCK_FAILED          = 7
+              OTHERS               = 8.
+          IF SY-SUBRC &lt;&gt; 0.
+            CONCATENATE &apos;Daemon on&apos; INSTANCE &apos;Error submitting background job&apos; INTO LOGMSG SEPARATED BY SPACE.
+            CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+              EXPORTING
+                LEVEL  = 1
+                LOGMSG = LOGMSG.
+            EXIT.
+          ENDIF.
+        ELSE.
+          CONCATENATE &apos;Daemon on&apos; INSTANCE &apos;Error submitting background job&apos; INTO LOGMSG SEPARATED BY SPACE.
+          CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+            EXPORTING
+              LEVEL  = 1
+              LOGMSG = LOGMSG.
+          EXIT.
+        ENDIF.
+      ELSE.
+        CONCATENATE &apos;Daemon on&apos; INSTANCE &apos;Error submitting background job&apos; INTO LOGMSG SEPARATED BY SPACE.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+          EXPORTING
+            LEVEL  = 1
+            LOGMSG = LOGMSG.
+        EXIT.
+      ENDIF.
+      CONCATENATE &apos;Backgound job ZNINJA_CRON_BGD_TASK submitted on instance&apos; INSTANCE INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 3
+          LOGMSG = LOGMSG.
+      WAIT UP TO 1 SECONDS.
+    ENDDO.
+
+    &quot; Check daemon guid execution token
+    CONCATENATE &apos;DAEMON_&apos; INSTANCE INTO KEYTAB_KEY.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;CHECK_EXECUTION_GUID
+      EXPORTING
+        KEY   = KEYTAB_KEY
+        GUID  = DAEMON_GUID
+      RECEIVING
+        VALID = OKCODE.
+    IF OKCODE = &apos;N&apos;.
+      CONCATENATE &apos;Scheduler daemon execution token&apos; TMPSTR1 &apos;no longer valid&apos; INSTANCE &apos;, terminating process&apos; INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 3
+          LOGMSG = LOGMSG.
+      CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+      KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+      KEYTAB_REC-STATUS = &apos;N&apos;.
+      KEYTAB_REC-DAT = SY-DATUM.
+      KEYTAB_REC-TIM = SY-UZEIT.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_REGISTRY&apos;
+          ID     = KEYTAB_KEY
+          RECORD = KEYTAB_REC
+        IMPORTING
+          RESULT = RTNVAL.
+      EXIT.
+    ENDIF.
+
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Database read and update section
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    GET TIME STAMP FIELD NOW_TS.
+    CALL METHOD CL_ABAP_TSTMP=&gt;SUBTRACT
+      EXPORTING
+        TSTMP1 = NOW_TS
+        TSTMP2 = LAST_DB_WORK_TS
+      RECEIVING
+        R_SECS = SECS_DIFF.
+    IF SECS_DIFF &gt; DBCHECK_INTERVAL_SECS.
+      &quot; Only do database work, like checking CRONTAB, at the DBCHECK interval at most
+      CONCATENATE &apos;Daemon on &apos; INSTANCE &apos;refreshing database configuration&apos; INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 3
+          LOGMSG = LOGMSG.
+      LAST_DB_WORK_TS = NOW_TS.
+
+      &quot; Read the CRONTAB scheduler table
+      CLEAR CRONTAB.
+      MOVE DAEMON_GUID TO TMPSTR1.
+      SELECT * FROM ZNINJA_CRONTAB INTO TABLE CRONTAB.
+      IF SY-SUBRC &lt;&gt; 0.
+        CONCATENATE &apos;Scheduler daemon with token&apos; TMPSTR1 &apos;on&apos; INSTANCE &apos;died, unable to read ZNINJA_CRONTAB&apos; INTO LOGMSG SEPARATED BY SPACE.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+          EXPORTING
+            LEVEL  = 0
+            LOGMSG = LOGMSG.
+        CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+        KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+        KEYTAB_REC-STATUS = &apos;N&apos;.
+        KEYTAB_REC-DAT = SY-DATUM.
+        KEYTAB_REC-TIM = SY-UZEIT.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+          EXPORTING
+            TABLE  = &apos;ZNINJA_REGISTRY&apos;
+            ID     = KEYTAB_KEY
+            RECORD = KEYTAB_REC
+          IMPORTING
+            RESULT = RTNVAL.
+        EXIT.
+      ENDIF.
+
+      &quot; Read the CRONTABX scheduler table
+      CLEAR CRONTABX.
+      SELECT * FROM ZNINJA_CRONTABX INTO TABLE CRONTABX.
+
+      &quot; Do not allow a wildcard in the seconds field of the cron record.  If they really want it to execute every second, use 0-59
+      UPDATE ZNINJA_CRONTAB
+      SET SS = &apos;0&apos;
+      WHERE
+          SS = &apos;*&apos;.
+
+      &quot; Get the number of exeuction slots
+      CONCATENATE &apos;EXECUTION_SLOTS_&apos; INSTANCE INTO KEYTAB_KEY.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_CONFIG&apos;
+          ID     = KEYTAB_KEY
+        IMPORTING
+          RECORD = KEYTAB_REC
+          RESULT = RTNVAL.
+      IF RTNVAL NE 0.
+        KEYTAB_REC-DESCRIPTION = &apos;Maximum number of SAP Ninja parallel jobs on this instance&apos;.
+        KEYTAB_REC-INT_VAL = 1.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+          EXPORTING
+            TABLE  = &apos;ZNINJA_CONFIG&apos;
+            ID     = KEYTAB_KEY
+            RECORD = KEYTAB_REC
+          IMPORTING
+            RESULT = RTNVAL.
+      ENDIF.
+      BACKGROUND_SLOTS_TOTAL = KEYTAB_REC-INT_VAL.
+
+      &quot; Find out what the DB sync/refresh time is for the scheduler daemon
+      MOVE &apos;DAEMON_DBCHECK&apos; TO KEYTAB_KEY.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_CONFIG&apos;
+          ID     = KEYTAB_KEY
+        IMPORTING
+          RECORD = KEYTAB_REC
+          RESULT = RTNVAL.
+      IF RTNVAL NE 0.
+        KEYTAB_REC-DESCRIPTION = &apos;Interval at which daemon re-checks the ZNINJA_CRONTAB and ZNINJA_CRONTABX tables&apos;.
+        KEYTAB_REC-INT_VAL = 600.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+          EXPORTING
+            TABLE  = &apos;ZNINJA_CONFIG&apos;
+            ID     = KEYTAB_KEY
+            RECORD = KEYTAB_REC
+          IMPORTING
+            RESULT = RTNVAL.
+      ENDIF.
+      DBCHECK_INTERVAL_SECS = KEYTAB_REC-INT_VAL.
+
+      &quot; Check if we allow a scheduler daemon to run on this instance
+      CONCATENATE &apos;DAEMON_ALLOWED_ON_&apos; INSTANCE INTO KEYTAB_KEY SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;GET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_CONFIG&apos;
+          ID     = KEYTAB_KEY
+        IMPORTING
+          RECORD = KEYTAB_REC
+          RESULT = RTNVAL.
+      IF RTNVAL NE 0.
+        KEYTAB_REC-DESCRIPTION = &apos;Execute scheduler daemon on this instance?&apos;.
+        KEYTAB_REC-STATUS = &apos;Y&apos;.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+          EXPORTING
+            TABLE  = &apos;ZNINJA_CONFIG&apos;
+            ID     = KEYTAB_KEY
+            RECORD = KEYTAB_REC
+          IMPORTING
+            RESULT = RTNVAL.
+      ENDIF.
+      DAEMON_ALLOWED_HERE = KEYTAB_REC-STATUS.
+      IF DAEMON_ALLOWED_HERE = &apos;N&apos;.
+        CONCATENATE &apos;Scheduler daemon not allowed on instance&apos; INSTANCE &apos;(check ZNINJA_CONFIG table).  Stopping&apos; INTO LOGMSG SEPARATED BY SPACE.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+          EXPORTING
+            LEVEL  = 2
+            LOGMSG = LOGMSG.
+        CONCATENATE &apos;DAEMON_&apos; INSTANCE INTO KEYTAB_KEY.
+        DELETE FROM ZNINJA_REGISTRY WHERE ID = KEYTAB_KEY.
+        CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+        KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+        KEYTAB_REC-STATUS = &apos;N&apos;.
+        KEYTAB_REC-DAT = SY-DATUM.
+        KEYTAB_REC-TIM = SY-UZEIT.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+          EXPORTING
+            TABLE  = &apos;ZNINJA_REGISTRY&apos;
+            ID     = KEYTAB_KEY
+            RECORD = KEYTAB_REC
+          IMPORTING
+            RESULT = RTNVAL.
+        EXIT.
+      ENDIF.
+    ENDIF.
+
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+    &quot; Forward scheduling (FS) section
+    &quot; This is slightly tricky.  We anticipate that we will wake up on multiples of 5 seconds and have a bunch of stuff to do from the
+    &quot; last wake-up.  Say our scheduler wakes up at 8:40:00, but it&apos;s 8:40:02 by the time we get to this point, we have missed out
+    &quot; on the work that should have been done at 8:40:01 and 8:40:02.  This point is slightly moot because we force the highest
+    &quot; granularity to be 5 seconds in the CRONTAB.  However, it is worth coding things correctly in case we make things more granular
+    &quot; later on.  As an example, in this scenario, the following should happen:
+    &quot;    1.  Scheduler wakes up at 8:40:00 precisely and executes a few tasks
+    &quot;    2.  By the time we get the FS section, it is 8:40:02
+    &quot;    3.  We rewind the clock to one second past the last clean multiple of 5 seconds, in this case, 8:40:01
+    &quot;    4   We play forward the clock to get a next schedule (NS) time, 1 second at a time, until we reach either:
+    &quot;          i.    A clean multiple of 5 seconds with something having been scheduled in that time (eg. 8:40:05 with job at 8:40:03)
+    &quot;          ii.   A clean multiple of 5 seconds that is &gt; HEARTBEAT time (eg. HEARTBEAT=60s, then 8:41:05 with no jobs scheduled)
+    &quot;          iii.  No multiple of 5 seconds, but we reach a schedule time that is not a multiple of 5 secs with the following conditions:
+    &quot;                a.  NS is &gt;= 5 seconds later than now (current SY-UZEIT)
+    &quot;                b.  There is nothing scheduled between NS and the next round 5 seconds after NS.
+    &quot;    5.  NS is the number of seconds to the next schedule time.  Issue a &quot;wait up to NS seconds&quot; command to sleep until then
+    &quot;    6.  If we code this with 5 seconds as a set constant, this logic will hold true if we want to change the constant either up or down.
+    &quot;-------------------------------------------------------------------------------------------------------------------------------------
+
+    &quot; Rewind the clock to one second past the last clean multiple of granularity seconds.  If you are already on a multiple of granularity,
+    &quot; you must have a freaking fast system or a small crontab, don&apos;t rewind in this case, but just play forward.
+    PLAYED_FORWARD_YET = &apos;N&apos;.
+    SLEEP_TIME = 0.
+    DAT = SY-DATUM.
+    TIM = SY-UZEIT.
+    NUMERATOR = TIM+4(2).
+    MODULUS = NUMERATOR MOD GRANULARITY_SECS.
+    WHILE MODULUS &gt; 1.
+      TIM = TIM - 1.
+      SLEEP_TIME = SLEEP_TIME - 1.
+      IF TIM = &apos;235959&apos;.
+        DAT = DAT - 1.
+      ENDIF.
+      NUMERATOR = TIM+4(2).
+      MODULUS = NUMERATOR MOD GRANULARITY_SECS.
+    ENDWHILE.
+
+    SOMETHING_SCHEDULED = &apos;N&apos;.
+    SLEEP_TIME_TO_FIRST_SCHEDULE = -99.
+    DO.
+      &quot; Check if the CRON record matches the current time and instance
+      LOOP AT CRONTAB ASSIGNING &lt;CRON&gt;.
+        CALL METHOD ZNINJA_CL_MON_STATIC=&gt;CHECK_CRON_MATCH
+          EXPORTING
+            CRON_INSTANCE           = &lt;CRON&gt;-INSTANCE
+            CRON_DATE_FROM          = &lt;CRON&gt;-DATE_FROM
+            CRON_TIME_FROM          = &lt;CRON&gt;-TIME_FROM
+            CRON_DATE_TO            = &lt;CRON&gt;-DATE_TO
+            CRON_TIME_TO            = &lt;CRON&gt;-TIME_TO
+            CRON_SS                 = &lt;CRON&gt;-SS
+            CRON_MI                 = &lt;CRON&gt;-MI
+            CRON_HR                 = &lt;CRON&gt;-HR
+            CRON_DM                 = &lt;CRON&gt;-DM
+            CRON_MM                 = &lt;CRON&gt;-MM
+            CRON_WD                 = &lt;CRON&gt;-WD
+            CHECK_INSTANCE          = INSTANCE
+            CHECK_DATE              = DAT
+            CHECK_TIME              = TIM
+            CHECK_ALLOW_WILDCARD_SS = &apos;N&apos;
+          IMPORTING
+            MATCH                   = CRON_OK.
+
+        &quot; Check if there is a CRONX record matches the current time, instance and metric_id
+        IF CRON_OK = &apos;Y&apos;.
+          LOOP AT CRONTABX ASSIGNING &lt;CRONX&gt;.
+            CALL METHOD ZNINJA_CL_MON_STATIC=&gt;CHECK_CRON_MATCH
+              EXPORTING
+                CRON_INSTANCE           = &lt;CRONX&gt;-INSTANCE
+                CRON_DATE_FROM          = &lt;CRONX&gt;-DATE_FROM
+                CRON_TIME_FROM          = &lt;CRONX&gt;-TIME_FROM
+                CRON_DATE_TO            = &lt;CRONX&gt;-DATE_TO
+                CRON_TIME_TO            = &lt;CRONX&gt;-TIME_TO
+                CRON_SS                 = &lt;CRONX&gt;-SS
+                CRON_MI                 = &lt;CRONX&gt;-MI
+                CRON_HR                 = &lt;CRONX&gt;-HR
+                CRON_DM                 = &lt;CRONX&gt;-DM
+                CRON_MM                 = &lt;CRONX&gt;-MM
+                CRON_WD                 = &lt;CRONX&gt;-WD
+                CHECK_INSTANCE          = INSTANCE
+                CHECK_DATE              = DAT
+                CHECK_TIME              = TIM
+                CHECK_ALLOW_WILDCARD_SS = &apos;Y&apos;
+              IMPORTING
+                MATCH                   = CRONX_BLOCK.
+            IF CRONX_BLOCK = &apos;Y&apos; AND ( &lt;CRONX&gt;-METRIC_ID = &apos;*&apos; OR &lt;CRONX&gt;-METRIC_ID = &lt;CRON&gt;-METRIC_ID ).
+              CRON_OK = &apos;N&apos;.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        IF CRON_OK = &apos;Y&apos;.
+          &quot; We have a real schedule item that is good to go.  Add it to Queue 1, provided the metric isn&apos;t already scheduled for type 1
+          COLLECTION_TYPE =  ZNINJA_CL_MON_STATIC=&gt;GET_METRIC_TYPE( &lt;CRON&gt;-METRIC_ID ).
+          COLLECTION_SOURCE =  ZNINJA_CL_MON_STATIC=&gt;GET_METRIC_SOURCE( &lt;CRON&gt;-METRIC_ID ).
+          CASE COLLECTION_TYPE.
+            WHEN 2.  &quot; Background all metrics, no concept of time range, only one per queue per instance!
+              SELECT COUNT( * ) INTO RTNVAL
+              FROM ZNINJA_BGD_QUEUE
+              WHERE INSTANCE = INSTANCE AND CRON_GUID = &lt;CRON&gt;-GUID AND COMPLETED = &apos;N&apos;.
+              IF RTNVAL &gt; 0.
+                &quot; There can only be one instance of this job queued up for this metric at any one time.
+                DELETE FROM ZNINJA_BGD_QUEUE WHERE INSTANCE = INSTANCE AND CRON_GUID = &lt;CRON&gt;-GUID.
+              ENDIF.
+              IF COLLECTION_SOURCE = 2.
+                QUEUE_BGD_ENTRY-INSTANCE = &apos;ANY&apos;.
+              ELSE.
+                QUEUE_BGD_ENTRY-INSTANCE = INSTANCE.
+              ENDIF.
+              QUEUE_BGD_ENTRY-CRON_GUID = &lt;CRON&gt;-GUID.
+              QUEUE_BGD_ENTRY-RUN_DATE = DAT.
+              QUEUE_BGD_ENTRY-RUN_TIME = TIM.
+              QUEUE_BGD_ENTRY-COMPLETED = &apos;N&apos;.
+              INSERT INTO ZNINJA_BGD_QUEUE VALUES QUEUE_BGD_ENTRY.
+              CONCATENATE &apos;Scheduler daemon on&apos; INSTANCE &apos;added batch execution for&apos; &lt;CRON&gt;-METRIC_ID &apos;at&apos; DAT TIM INTO LOGMSG SEPARATED BY SPACE.
+              CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+                EXPORTING
+                  LEVEL  = 4
+                  LOGMSG = LOGMSG.
+            WHEN 3.  &quot; Background all metrics, no concept of time range
+              QUEUE_BGD_ENTRY-INSTANCE = INSTANCE.
+              QUEUE_BGD_ENTRY-CRON_GUID = &lt;CRON&gt;-GUID.
+              QUEUE_BGD_ENTRY-RUN_DATE = DAT.
+              QUEUE_BGD_ENTRY-RUN_TIME = TIM.
+              QUEUE_BGD_ENTRY-COMPLETED = &apos;N&apos;.
+              INSERT INTO ZNINJA_BGD_QUEUE VALUES QUEUE_BGD_ENTRY.
+              CONCATENATE &apos;Scheduler daemon on&apos; INSTANCE &apos;added batch execution for&apos; &lt;CRON&gt;-METRIC_ID &apos;at&apos; DAT TIM INTO LOGMSG SEPARATED BY SPACE.
+              CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+                EXPORTING
+                  LEVEL  = 4
+                  LOGMSG = LOGMSG.
+              QUEUE_DIA_ENTRY-CRON_GUID = &lt;CRON&gt;-GUID.
+              QUEUE_DIA_ENTRY-RUN_DATE = DAT.
+              QUEUE_DIA_ENTRY-RUN_TIME = TIM.
+              INSERT QUEUE_DIA_ENTRY INTO TABLE QUEUE_DIA.
+              CONCATENATE &apos;Scheduler daemon on&apos; INSTANCE &apos;added dialog execution for&apos; &lt;CRON&gt;-METRIC_ID &apos;at&apos; DAT TIM INTO LOGMSG SEPARATED BY SPACE.
+              CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+                EXPORTING
+                  LEVEL  = 4
+                  LOGMSG = LOGMSG.
+          ENDCASE.
+          SOMETHING_SCHEDULED = &apos;Y&apos;.
+          IF SLEEP_TIME_TO_FIRST_SCHEDULE = -99.
+            SLEEP_TIME_TO_FIRST_SCHEDULE = SLEEP_TIME.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      &quot; We need the modulus to work out if we have landed on a round granularity value
+      NUMERATOR = TIM+4(2).
+      MODULUS = NUMERATOR MOD GRANULARITY_SECS.
+      IF PLAYED_FORWARD_YET = &apos;Y&apos;.
+        IF MODULUS = 0 AND SOMETHING_SCHEDULED = &apos;Y&apos; AND SLEEP_TIME_TO_FIRST_SCHEDULE &gt;= GRANULARITY_SECS.
+          &quot; Exit if it is not a clean multiple of granularity, but SLEEP_TIME is already &gt;= GRANULARITY and nothing is scheduled between this item and next
+          &quot; granularity increment.
+          SLEEP_TIME = SLEEP_TIME_TO_FIRST_SCHEDULE.
+        ENDIF.
+        &quot; Loop exit conditions
+        IF MODULUS = 0 AND SOMETHING_SCHEDULED = &apos;Y&apos;.
+          &quot; Exit if we reach the next clean multiple of granularity with something having been scheduled in that time
+          EXIT.
+        ENDIF.
+        IF MODULUS = 0 AND SOMETHING_SCHEDULED = &apos;N&apos; AND SLEEP_TIME &gt;= HEARTBEAT_SECS.
+          &quot; Exit if we reach clean multiple of granularity that is &gt; HEARTBEAT time and no jobs scheduled)
+          EXIT.
+        ENDIF.
+      ENDIF.
+
+      &quot; Keep playing time forward (FS)
+      PLAYED_FORWARD_YET = &apos;Y&apos;.
+      TIM = TIM + 1.
+      IF TIM = &apos;000000&apos;.
+        DAT = DAT + 1.
+      ENDIF.
+      SLEEP_TIME = SLEEP_TIME + 1.
+    ENDDO.
+
+    &quot; Check daemon guid execution token
+    CONCATENATE &apos;DAEMON_&apos; INSTANCE INTO KEYTAB_KEY.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;CHECK_EXECUTION_GUID
+      EXPORTING
+        KEY   = KEYTAB_KEY
+        GUID  = DAEMON_GUID
+      RECEIVING
+        VALID = OKCODE.
+    IF OKCODE = &apos;N&apos;.
+      CONCATENATE &apos;Scheduler daemon execution token&apos; TMPSTR1 &apos;no longer valid&apos; INSTANCE &apos;, terminating process&apos; INTO LOGMSG SEPARATED BY SPACE.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+        EXPORTING
+          LEVEL  = 3
+          LOGMSG = LOGMSG.
+      CONCATENATE &apos;DAEMON_ACTIVE_&apos; INSTANCE INTO KEYTAB_KEY.
+      KEYTAB_REC-DESCRIPTION = &apos;Flag to say if the daemon is currently active or not&apos;.
+      KEYTAB_REC-STATUS = &apos;N&apos;.
+      KEYTAB_REC-DAT = SY-DATUM.
+      KEYTAB_REC-TIM = SY-UZEIT.
+      CALL METHOD ZNINJA_CL_MON_STATIC=&gt;SET_KEYTAB
+        EXPORTING
+          TABLE  = &apos;ZNINJA_REGISTRY&apos;
+          ID     = KEYTAB_KEY
+          RECORD = KEYTAB_REC
+        IMPORTING
+          RESULT = RTNVAL.
+      EXIT.
+    ENDIF.
+
+    TMPSTR1 = SLEEP_TIME.
+    CONCATENATE &apos;Scheduler daemon on&apos; INSTANCE &apos;sleeping for&apos; TMPSTR1 &apos;seconds&apos; INTO LOGMSG SEPARATED BY SPACE.
+    CALL METHOD ZNINJA_CL_MON_STATIC=&gt;WRITE_LOG
+      EXPORTING
+        LEVEL  = 3
+        LOGMSG = LOGMSG.
+    WAIT UP TO SLEEP_TIME SECONDS.
+  ENDDO.</fm_source_new>
+   <functionModuleDocumentation/>
+  </functionmodule>
+  <functionmodule NAME="ZNINJA_UPD_HEAD_STATUS" UTASK="2" STEXT="Update header status serially in update task">
+   <importing PARAMETER="STATUS" TYP="ZNINJA_FLAG"/>
+   <importing PARAMETER="GUID" TYP="SYSUUID_X"/>
+   <documentation PARAMETER="STATUS" KIND="P" STEXT="Status Flag" INDEX=" 001"/>
+   <documentation PARAMETER="GUID" KIND="P" STEXT="GUID" INDEX=" 002"/>
+   <fm_source_new>* ----------------------------------------------------------------------
+* Copyright (C) 2012
+* Author: Jim Cooke (Australia)
+* Version 3.00
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+* You should have received a copy of the GNU General Public License
+* along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+* ----------------------------------------------------------------------
+*--------------------------------------------------------------------------------
+* Change Log:
+* ----------
+*   Date       Issue #  Issue Link
+* -----------  -------  ------------------------
+*--------------------------------------------------------------------------------
+
+  &quot; the table ZNINJA_MONITOR, which can get quite &quot;hot&quot;
+  UPDATE ZNINJA_MONITOR SET ZSENT = &apos;N&apos; WHERE ZGUID = GUID.</fm_source_new>
+   <functionModuleDocumentation/>
+  </functionmodule>
+ </functionmodules>
+</FUGR>
